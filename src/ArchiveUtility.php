@@ -59,11 +59,12 @@ final class ArchiveUtility
      * @param string $src Source file path (must exist and be readable)
      * @param string $dst Destination path (extension added automatically if missing)
      * @param string|null $backend Backend to use (null = auto-detect best available)
+     * @param callable|null $tickCallback Optional callback called every 100ms during compression
      * @return string Final destination path with appropriate extension
      * @throws RuntimeException If compression fails or backend unavailable
      * @throws InvalidArgumentException If source file is invalid
      */
-    public static function compressFile(string $src, string $dst, ?string $backend = null): string
+    public static function compressFile(string $src, string $dst, ?string $backend = null, ?callable $tickCallback = null): string
     {
         self::validateSourceFile($src);
         self::ensureDestinationDirectory($dst);
@@ -72,9 +73,9 @@ final class ArchiveUtility
         $dst = self::ensureExtension($dst, $backend);
 
         match ($backend) {
-            self::BACKEND_ZSTD => self::compressWithZstd($src, $dst),
-            self::BACKEND_PIGZ => self::compressWithPigz($src, $dst),
-            self::BACKEND_GZIP => self::compressWithGzip($src, $dst),
+            self::BACKEND_ZSTD => self::compressWithZstd($src, $dst, $tickCallback),
+            self::BACKEND_PIGZ => self::compressWithPigz($src, $dst, $tickCallback),
+            self::BACKEND_GZIP => self::compressWithGzip($src, $dst, $tickCallback),
             self::BACKEND_ZIP => self::compressWithZip($src, $dst),
             default => throw new InvalidArgumentException("Unsupported backend: $backend"),
         };
@@ -715,6 +716,43 @@ final class ArchiveUtility
     }
 
     /**
+     * Execute a command with optional tick callback for progress.
+     *
+     * @param array<string> $args Command and arguments
+     * @param callable|null $tickCallback Optional callback called every 100ms while running
+     * @throws RuntimeException If command fails
+     */
+    private static function runCommandWithCallback(array $args, ?callable $tickCallback = null): void
+    {
+        $process = new Process($args);
+        $process->setTimeout(null);
+
+        if ($tickCallback !== null) {
+            $process->start();
+            while ($process->isRunning()) {
+                $tickCallback();
+                usleep(100000); // 100ms
+            }
+        } else {
+            $process->run();
+        }
+
+        if (!$process->isSuccessful()) {
+            $stdout = $process->getOutput();
+            $stderr = $process->getErrorOutput();
+            throw new RuntimeException(
+                sprintf(
+                    "Command failed with exit code %d: %s\nOutput: %s\nError: %s",
+                    $process->getExitCode(),
+                    implode(' ', $args),
+                    $stdout,
+                    $stderr
+                )
+            );
+        }
+    }
+
+    /**
      * Execute a command and stream its output directly to a file.
      * Memory-efficient for large files.
      *
@@ -789,10 +827,39 @@ final class ArchiveUtility
      * @param array<string> $args Command and arguments
      * @param string $inputFile Path to read input from
      * @param string $outputFile Path to write output to
+     * @param callable|null $tickCallback Optional callback called every 100ms while running
      * @throws RuntimeException If command fails
      */
-    private static function runCommandFileToFile(array $args, string $inputFile, string $outputFile): void
+    private static function runCommandFileToFile(array $args, string $inputFile, string $outputFile, ?callable $tickCallback = null): void
     {
+        if ($tickCallback !== null) {
+            // Use shell redirection to avoid pipe blocking with large files
+            $escapedInput = escapeshellarg($inputFile);
+            $escapedOutput = escapeshellarg($outputFile);
+            $shellCommand = implode(' ', array_map('escapeshellarg', $args)) . ' < ' . $escapedInput . ' > ' . $escapedOutput;
+
+            $process = Process::fromShellCommandline($shellCommand);
+            $process->setTimeout(null);
+            $process->start();
+
+            while ($process->isRunning()) {
+                $tickCallback();
+                usleep(100000); // 100ms
+            }
+
+            if (!$process->isSuccessful()) {
+                throw new RuntimeException(
+                    sprintf(
+                        "Command failed with exit code %d: %s\nError: %s",
+                        $process->getExitCode(),
+                        implode(' ', $args),
+                        $process->getErrorOutput()
+                    )
+                );
+            }
+            return;
+        }
+
         $inputHandle = fopen($inputFile, 'r');
         if ($inputHandle === false) {
             throw new RuntimeException("Failed to open input file: $inputFile");
@@ -835,7 +902,7 @@ final class ArchiveUtility
     /**
      * Compress with zstd.
      */
-    private static function compressWithZstd(string $src, string $dst): void
+    private static function compressWithZstd(string $src, string $dst, ?callable $tickCallback = null): void
     {
         self::ensureCmd('zstd');
 
@@ -853,27 +920,27 @@ final class ArchiveUtility
             $src
         ];
 
-        self::runCommand($args);
+        self::runCommandWithCallback($args, $tickCallback);
     }
 
     /**
      * Compress with pigz.
      */
-    private static function compressWithPigz(string $src, string $dst): void
+    private static function compressWithPigz(string $src, string $dst, ?callable $tickCallback = null): void
     {
         self::ensureCmd('pigz');
 
-        self::runCommandFileToFile(['pigz', '-c'], $src, $dst);
+        self::runCommandFileToFile(['pigz', '-c'], $src, $dst, $tickCallback);
     }
 
     /**
      * Compress with gzip.
      */
-    private static function compressWithGzip(string $src, string $dst): void
+    private static function compressWithGzip(string $src, string $dst, ?callable $tickCallback = null): void
     {
         self::ensureCmd('gzip');
 
-        self::runCommandFileToFile(['gzip', '-c'], $src, $dst);
+        self::runCommandFileToFile(['gzip', '-c'], $src, $dst, $tickCallback);
     }
 
     /**
