@@ -118,10 +118,11 @@ final class ArchiveUtility
      *
      * @param string $src Archive file path
      * @param string $dstDir Destination directory (created if doesn't exist)
+     * @param callable|null $tickCallback Optional callback called every 100ms during decompression
      * @return string Path to the extracted file
      * @throws RuntimeException If decompression fails
      */
-    public static function decompressToFile(string $src, string $dstDir): string
+    public static function decompressToFile(string $src, string $dstDir, ?callable $tickCallback = null): string
     {
         if (!is_file($src)) {
             throw new RuntimeException("Archive not found: $src");
@@ -144,8 +145,8 @@ final class ArchiveUtility
 
         // Decompress based on extension
         $extracted = match ($ext) {
-            'zst' => self::decompressZstd($src, $dstDir),
-            'gz' => self::decompressGzip($src, $dstDir),
+            'zst' => self::decompressZstd($src, $dstDir, $tickCallback),
+            'gz' => self::decompressGzip($src, $dstDir, $tickCallback),
             'zip' => self::decompressZip($src, $dstDir),
             default => throw new RuntimeException("Unsupported archive format: .$ext")
         };
@@ -719,9 +720,10 @@ final class ArchiveUtility
      *
      * @param array<string> $args Command and arguments
      * @param string $outputFile Path to write output to
+     * @param callable|null $tickCallback Optional callback called every 100ms while running
      * @throws RuntimeException If command fails
      */
-    private static function runCommandToFile(array $args, string $outputFile): void
+    private static function runCommandToFile(array $args, string $outputFile, ?callable $tickCallback = null): void
     {
         $handle = fopen($outputFile, 'w');
         if ($handle === false) {
@@ -731,11 +733,25 @@ final class ArchiveUtility
         try {
             $process = new Process($args);
             $process->setTimeout(null);
-            $process->run(function ($type, $buffer) use ($handle): void {
-                if ($type === Process::OUT) {
-                    fwrite($handle, $buffer);
+
+            if ($tickCallback !== null) {
+                // Start async and poll with callback for progress updates
+                $process->start(function ($type, $buffer) use ($handle): void {
+                    if ($type === Process::OUT) {
+                        fwrite($handle, $buffer);
+                    }
+                });
+                while ($process->isRunning()) {
+                    $tickCallback();
+                    usleep(100000); // 100ms
                 }
-            });
+            } else {
+                $process->run(function ($type, $buffer) use ($handle): void {
+                    if ($type === Process::OUT) {
+                        fwrite($handle, $buffer);
+                    }
+                });
+            }
 
             if (!$process->isSuccessful()) {
                 throw new RuntimeException(
@@ -911,13 +927,13 @@ final class ArchiveUtility
     /**
      * Decompress zstd file.
      */
-    private static function decompressZstd(string $src, string $dstDir): string
+    private static function decompressZstd(string $src, string $dstDir, ?callable $tickCallback = null): string
     {
         self::ensureCmd('zstd');
 
         $dst = rtrim($dstDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . self::stripLastExt(basename($src));
 
-        self::runCommandToFile(['zstd', '-dc', $src], $dst);
+        self::runCommandToFile(['zstd', '-dc', $src], $dst, $tickCallback);
 
         return $dst;
     }
@@ -934,14 +950,14 @@ final class ArchiveUtility
     /**
      * Decompress gzip file.
      */
-    private static function decompressGzip(string $src, string $dstDir): string
+    private static function decompressGzip(string $src, string $dstDir, ?callable $tickCallback = null): string
     {
         $cmd = self::hasCmd('pigz') ? 'pigz' : 'gzip';
         self::ensureCmd($cmd);
 
         $dst = rtrim($dstDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . self::stripLastExt(basename($src));
 
-        self::runCommandToFile([$cmd, '-dc', $src], $dst);
+        self::runCommandToFile([$cmd, '-dc', $src], $dst, $tickCallback);
 
         return $dst;
     }
