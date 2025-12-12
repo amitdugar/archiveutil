@@ -725,6 +725,34 @@ final class ArchiveUtility
      */
     private static function runCommandToFile(array $args, string $outputFile, ?callable $tickCallback = null): void
     {
+        if ($tickCallback !== null) {
+            // Use shell redirection to avoid pipe blocking with large outputs
+            $escapedOutput = escapeshellarg($outputFile);
+            $shellCommand = implode(' ', array_map('escapeshellarg', $args)) . ' > ' . $escapedOutput;
+
+            $process = Process::fromShellCommandline($shellCommand);
+            $process->setTimeout(null);
+            $process->start();
+
+            while ($process->isRunning()) {
+                $tickCallback();
+                usleep(100000); // 100ms
+            }
+
+            if (!$process->isSuccessful()) {
+                throw new RuntimeException(
+                    sprintf(
+                        "Command failed with exit code %d: %s\nError: %s",
+                        $process->getExitCode(),
+                        implode(' ', $args),
+                        $process->getErrorOutput()
+                    )
+                );
+            }
+            return;
+        }
+
+        // Without callback, use standard output callback
         $handle = fopen($outputFile, 'w');
         if ($handle === false) {
             throw new RuntimeException("Failed to open output file: $outputFile");
@@ -733,25 +761,11 @@ final class ArchiveUtility
         try {
             $process = new Process($args);
             $process->setTimeout(null);
-
-            if ($tickCallback !== null) {
-                // Start async and poll with callback for progress updates
-                $process->start(function ($type, $buffer) use ($handle): void {
-                    if ($type === Process::OUT) {
-                        fwrite($handle, $buffer);
-                    }
-                });
-                while ($process->isRunning()) {
-                    $tickCallback();
-                    usleep(100000); // 100ms
+            $process->run(function ($type, $buffer) use ($handle): void {
+                if ($type === Process::OUT) {
+                    fwrite($handle, $buffer);
                 }
-            } else {
-                $process->run(function ($type, $buffer) use ($handle): void {
-                    if ($type === Process::OUT) {
-                        fwrite($handle, $buffer);
-                    }
-                });
-            }
+            });
 
             if (!$process->isSuccessful()) {
                 throw new RuntimeException(
