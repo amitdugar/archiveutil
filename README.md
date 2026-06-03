@@ -4,7 +4,7 @@ Smart single-file compressor/decompressor with automatic backend selection (zstd
 
 ## Requirements
 
-- PHP 8.2+
+- PHP 8.4 – 8.5
 - Extensions: `zip`, `zlib`
 - CLI tools on `PATH` for compression/decompression: `zstd` (preferred), `pigz`, `gzip`. If none are present, falls back to `ZipArchive` for `.zip`.
 - Composer dependency: `symfony/process`
